@@ -4,15 +4,19 @@ const app = express();
 
 const PORT = process.env.PORT || 3000;
 
-const UPSTREAM = "https://api.allanime.day";
+// Must match the backend the working browser uses (mkissa.to -> api.mkissa.net).
+// api.allanime.day is a DIFFERENT backend on a different aaReq key schedule and
+// its bootstrap is Cloudflare-locked, so signed requests forwarded there fail
+// with AA_CRYPTO_STALE.
+const UPSTREAM = "https://api.mkissa.net";
 
 const FORWARD_HEADERS = {
   accept: "*/*",
   "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
-  origin: "https://allmanga.to",
-  referer: "https://allmanga.to/",
+  origin: "https://mkissa.to",
+  referer: "https://mkissa.to/",
   "user-agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
 };
 
 app.use(express.raw({ type: "*/*" }));
