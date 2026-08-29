@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "publish-rc": "node publish-rc.js",
+    "publish-rc:dry": "node publish-rc.js --dry-run",
+    "values": "node rc-values.js"
   },
   "dependencies": {
     "express": "^4.21.2"

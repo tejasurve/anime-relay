@@ -1,3 +1,9 @@
 node_modules/
 package-lock.json
 .env
+.env.*
+
+# Service account keys belong in env vars, never in the repo.
+*serviceaccount*.json
+*service-account*.json
+*firebase-adminsdk*.json

@@ -14,6 +14,7 @@
  *
  * Everything else is a plain passthrough.
  */
+const crypto = require("crypto");
 const express = require("express");
 
 const upstream = require("./src/upstream");
@@ -152,8 +153,20 @@ app.get("/healthz", async (_req, res) => {
   });
 });
 
-/// Manual trigger for the same check the hourly job runs.
-app.post("/admin/verify", async (_req, res) => {
+/// Manual trigger for the same check the hourly job runs. Guarded because it
+/// spends upstream calls (which feed the captcha gate) and can publish to
+/// Remote Config; without ADMIN_TOKEN set it is disabled rather than open.
+app.post("/admin/verify", async (req, res) => {
+  const expected = process.env.ADMIN_TOKEN;
+  if (!expected) {
+    return res.status(404).json({ error: "admin disabled (set ADMIN_TOKEN)" });
+  }
+  const supplied = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  const a = Buffer.from(supplied);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
   try {
     res.json(await verifier.verify());
   } catch (err) {
