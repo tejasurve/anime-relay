@@ -21,9 +21,20 @@ const UA =
 
 const RESOLVERS = ["episode", "chapterPages"];
 
-async function get(url) {
-  const res = await fetch(url, {
-    headers: { "user-agent": UA, referer: `${SITE}/` },
+async function get(url, { fresh = false } = {}) {
+  // The homepage must be read fresh. Entry filenames are content-hashed, so a
+  // CDN-cached homepage silently pins the whole scan to a superseded bundle —
+  // which is how this ended up recovering a build id upstream had already
+  // stopped accepting. Immutable chunks are content-addressed and safe to cache.
+  const target = fresh
+    ? `${url}${url.includes("?") ? "&" : "?"}_cb=${Date.now()}`
+    : url;
+  const res = await fetch(target, {
+    headers: {
+      "user-agent": UA,
+      referer: `${SITE}/`,
+      ...(fresh ? { "cache-control": "no-cache", pragma: "no-cache" } : {}),
+    },
   });
   if (!res.ok) throw new Error(`GET ${url} -> HTTP ${res.status}`);
   return res.text();
@@ -326,18 +337,36 @@ function extractQueryHash(src, resolver) {
 /// Walk the site's chunks once and pull out both the signing material and the
 /// query hashes. They usually live in different chunks, and each chunk is
 /// hundreds of kilobytes, so a single shared pass keeps a refresh cheap.
-async function scan() {
-  const home = await get(`${SITE}/`);
-  const entries = [
+/// Routes to look for entry bundles on, in order of preference.
+///
+/// The homepage is not trustworthy on its own. Entry filenames are baked into
+/// the served HTML, and the homepage is cached far more aggressively than the
+/// content routes, so it can keep advertising a superseded bundle for hours
+/// after a rotation. That is not hypothetical: it once left the scanner
+/// recovering build 155 while the API had already moved to 157-159 and the
+/// content routes were serving the current bundle. Content routes first, and
+/// the homepage only as a fallback.
+const ROUTES = (process.env.SCAN_ROUTES || "/anime,/manga,/").split(",");
+
+function entriesIn(html) {
+  return [
     ...new Set(
       [
-        ...home.matchAll(
+        ...html.matchAll(
           /https?:\/\/[^"']+\/_app\/immutable\/entry\/(?:app|start)\.[A-Za-z0-9_-]+\.js/g
         ),
       ].map((m) => m[0])
     ),
   ];
-  if (!entries.length) throw new Error("no entry bundle on homepage");
+}
+
+async function scanRoute(route, errors) {
+  const html = await get(`${SITE}${route}`, { fresh: true });
+  const entries = entriesIn(html);
+  if (!entries.length) {
+    errors.push(`${route}: no entry bundle`);
+    return null;
+  }
   const base = entries[0].slice(
     0,
     entries[0].indexOf("/immutable/") + "/immutable/".length
@@ -351,7 +380,6 @@ async function scan() {
 
   let material = null;
   const hashes = {};
-  const errors = [];
 
   for (const name of names) {
     if (material && RESOLVERS.every((r) => hashes[r])) break;
@@ -365,7 +393,7 @@ async function scan() {
       try {
         material = extractMaterial(js);
       } catch (err) {
-        errors.push(`material: ${err.message}`);
+        errors.push(`${route} material: ${err.message}`);
       }
     }
     if (js.includes("chapterPages(")) {
@@ -374,16 +402,28 @@ async function scan() {
         try {
           hashes[r] = extractQueryHash(js, r);
         } catch (err) {
-          errors.push(`${r}: ${err.message}`);
+          errors.push(`${route} ${r}: ${err.message}`);
         }
       }
     }
   }
 
-  if (!material) {
-    throw new Error(`signing material not recovered (${errors.join("; ") || "no crypto chunk"})`);
+  return material ? { material, hashes } : null;
+}
+
+async function scan() {
+  const errors = [];
+  for (const route of ROUTES) {
+    let found;
+    try {
+      found = await scanRoute(route, errors);
+    } catch (err) {
+      errors.push(`${route}: ${err.message}`);
+      continue;
+    }
+    if (found) return { ...found, errors };
   }
-  return { material, hashes, errors };
+  throw new Error(`signing material not recovered (${errors.join("; ") || "no crypto chunk"})`);
 }
 
 module.exports = { scan, SITE, UA };
