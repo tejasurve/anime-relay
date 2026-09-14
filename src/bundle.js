@@ -42,8 +42,44 @@ async function get(url, { fresh = false } = {}) {
 
 // ── Source slicing helpers ──────────────────────────────────────────────────
 
+/// Index just past the `)` matching the `(` at `from`.
+function endOfParens(src, from) {
+  let depth = 0;
+  let quote = null;
+  for (let i = from; i < src.length; i++) {
+    const c = src[i];
+    if (src[i - 1] === "\\") continue;
+    if (quote) {
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      quote = c;
+      continue;
+    }
+    if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+
+/// Slices a whole function declaration starting at `from`, which must point at
+/// its `function` keyword.
 function balancedBody(src, from) {
-  const open = src.indexOf("{", from);
+  // Step over the parameter list before looking for the body. A destructured
+  // parameter opens a brace that is not the body, so counting from the first
+  // brace truncates the function at the end of the pattern instead — which is
+  // how the boot-token builder, `function KA({buildId, group, host, ...})`,
+  // came back as a fragment that would not parse.
+  let searchFrom = from;
+  const paren = src.indexOf("(", from);
+  const firstBrace = src.indexOf("{", from);
+  if (paren !== -1 && (firstBrace === -1 || paren < firstBrace)) {
+    const afterParams = endOfParens(src, paren);
+    if (afterParams !== -1) searchFrom = afterParams;
+  }
+
+  const open = src.indexOf("{", searchFrom);
   let depth = 0;
   let quote = null;
   for (let i = open; i < src.length; i++) {
@@ -161,6 +197,18 @@ function findDecl(src, name, lo, hi) {
 // ── Signing material ────────────────────────────────────────────────────────
 
 function extractMaterial(src) {
+  const buildIdFallback = extractBuildIdFromJs(src);
+  const maskHexFallback = extractMaskHexFromJs(src);
+  const bootParamsFallback = extractBootParamsFromJs(src);
+
+  if (buildIdFallback && maskHexFallback) {
+    return {
+      buildId: buildIdFallback,
+      maskHex: maskHexFallback,
+      params: bootParamsFallback,
+    };
+  }
+
   let maskFn = null;
   let buildVar = null;
   for (const m of src.matchAll(
@@ -178,64 +226,166 @@ function extractMaterial(src) {
       break;
     }
   }
-  if (!maskFn) throw new Error("mask builder not found in bundle");
+  if (!maskFn) {
+    if (buildIdFallback && maskHexFallback) {
+      return {
+        buildId: buildIdFallback,
+        maskHex: maskHexFallback,
+        params: bootParamsFallback,
+      };
+    }
+    throw new Error("mask builder not found in bundle");
+  }
 
   const at = src.indexOf(`function ${maskFn}(`);
   const lo = Math.max(0, at - 25000);
   const hi = Math.min(src.length, at + 25000);
 
+  // Declarations are collected from a window around the mask builder rather
+  // than the whole file. Names are minified to a character or two and repeat
+  // across modules, so the nearest declaration is the correct one, and walking
+  // every identifier across a megabyte-scale chunk does not finish.
   const seen = new Map();
-  const queue = [maskFn, buildVar];
-  while (queue.length) {
-    const name = queue.shift();
-    if (seen.has(name) || RESERVED.has(name)) continue;
-    let decl;
-    try {
-      decl = findDecl(src, name, lo, hi);
-    } catch {
-      continue;
+  const walk = (names) => {
+    const queue = [...names];
+    while (queue.length) {
+      const name = queue.shift();
+      if (seen.has(name) || RESERVED.has(name)) continue;
+      let decl;
+      try {
+        decl = findDecl(src, name, lo, hi);
+      } catch {
+        continue;
+      }
+      if (!decl) continue;
+      seen.set(name, decl);
+      for (const t of decl.code.matchAll(/[A-Za-z_$][\w$]{1,}/g)) {
+        if (!seen.has(t[0]) && !RESERVED.has(t[0])) queue.push(t[0]);
+      }
     }
-    if (!decl) continue;
-    seen.set(name, decl);
-    for (const t of decl.code.matchAll(/[A-Za-z_$][\w$]{1,}/g)) {
-      if (!seen.has(t[0]) && !RESERVED.has(t[0])) queue.push(t[0]);
-    }
-  }
-
-  // The bundle rotates its string table at load time; without replaying those
-  // IIFEs every extracted literal decodes to garbage.
-  const rotators = [];
-  for (const m of src.matchAll(/\(function\([a-z],[a-z]\)\{/g)) {
-    let stmt;
-    try {
-      stmt = statement(src, m.index);
-    } catch {
-      continue;
-    }
-    const tail = /\)\(\s*([A-Za-z_$][\w$]*)\s*,/.exec(stmt.slice(-120));
-    if (tail && seen.has(tail[1])) rotators.push({ at: m.index, code: stmt });
-  }
-
-  const byOffset = new Map();
-  for (const d of [...seen.values(), ...rotators]) byOffset.set(d.at, d);
-  const code = [...byOffset.values()]
-    .sort((a, b) => a.at - b.at)
-    .map((d) => d.code)
-    .join("\n");
-
-  const sandbox = {
-    atob: (s) => Buffer.from(s, "base64").toString("binary"),
-    btoa: (s) => Buffer.from(s, "binary").toString("base64"),
-    TextEncoder, Uint8Array, Array, String, Number, Math, JSON, Date, Error,
-    Symbol, parseInt, Function, console,
   };
-  sandbox.globalThis = sandbox;
-  sandbox.window = sandbox;
-  vm.createContext(sandbox);
-  new vm.Script(
-    `${code}\n;globalThis.__mask=Array.from(${maskFn}()||[]);` +
-      `globalThis.__build=String(${buildVar}||"");`
-  ).runInContext(sandbox, { timeout: 15000 });
+  walk([maskFn, buildVar]);
+
+  /// Finds one declaration that the window missed, preferring the nearest
+  /// match. Used only to repair a specific undefined identifier, never for the
+  /// bulk walk, so the widening stays cheap.
+  const resolveNear = (name) => {
+    for (const radius of [60000, 250000, src.length]) {
+      const decl = findDecl(
+        src,
+        name,
+        Math.max(0, at - radius),
+        Math.min(src.length, at + radius)
+      );
+      if (decl) return decl;
+    }
+    return null;
+  };
+
+  const replay = () => {
+    // The bundle rotates its string table at load time; without replaying those
+    // IIFEs every extracted literal decodes to garbage.
+    const rotators = [];
+    for (const m of src.matchAll(/\(function\([a-z],[a-z]\)\{/g)) {
+      let stmt;
+      try {
+        stmt = statement(src, m.index);
+      } catch {
+        continue;
+      }
+      const tail = /\)\(\s*([A-Za-z_$][\w$]*)\s*,/.exec(stmt.slice(-120));
+      if (tail && seen.has(tail[1])) rotators.push({ at: m.index, code: stmt });
+    }
+
+    const byOffset = new Map();
+    for (const d of [...seen.values(), ...rotators]) byOffset.set(d.at, d);
+    // Declarations can nest: a name repaired later may live inside a function
+    // already captured, and emitting both splices a fragment into the middle of
+    // that function's own body, which will not parse. Keep outermost spans only
+    // — the inner declaration comes along inside its parent anyway.
+    let end = Number.NEGATIVE_INFINITY;
+    const code = [...byOffset.values()]
+      .sort((a, b) => a.at - b.at)
+      .filter((d) => {
+        if (d.promoted) return true;
+        if (d.at < end) return false;
+        end = Math.max(end, d.at + d.code.length);
+        return true;
+      })
+      .map((d) => d.code)
+      .join("\n");
+
+    const sandbox = {
+      atob: (s) => Buffer.from(s, "base64").toString("binary"),
+      btoa: (s) => Buffer.from(s, "binary").toString("base64"),
+      TextEncoder, Uint8Array, Array, String, Number, Math, JSON, Date, Error,
+      Symbol, parseInt, Function, console,
+    };
+    sandbox.globalThis = sandbox;
+    sandbox.window = sandbox;
+    vm.createContext(sandbox);
+    const program =
+      `${code}\n;globalThis.__mask=Array.from(${maskFn}()||[]);` +
+      `globalThis.__build=String(${buildVar}||"");`;
+    try {
+      new vm.Script(program).runInContext(sandbox, { timeout: 15000 });
+    } catch (err) {
+      if (process.env.AA_DEBUG) {
+        require("fs").writeFileSync("/tmp/aa_replay.js", program);
+        console.error(
+          `[debug] replay failed (${err.message}); ` +
+            `program written to /tmp/aa_replay.js (${program.length} bytes, ` +
+            `${[...seen.keys()].length} decls)`
+        );
+      }
+      throw err;
+    }
+    return sandbox;
+  };
+
+  // Repair loop: each failed replay names exactly one identifier it could not
+  // resolve, so fetch that one declaration and try again. Upstream merged the
+  // crypto and GraphQL code into a single chunk, which pushed some dependencies
+  // outside the window; this recovers them without widening the bulk walk.
+  let sandbox = null;
+  for (let i = 0; i < 40 && !sandbox; i++) {
+    try {
+      sandbox = replay();
+    } catch (err) {
+      const missing = /^([A-Za-z_$][\w$]*) is not defined$/.exec(err.message);
+      if (!missing) throw err;
+      let decl = seen.get(missing[1]);
+      // Nested functions get dropped by the outermost-span filter, so a name
+      // can be "found" and still undefined at global scope. Hoist a copy.
+      if (decl && decl.promoted) throw err;
+      if (!decl) {
+        decl = resolveNear(missing[1]);
+        if (!decl) throw new Error(`${err.message} and no declaration found`);
+      }
+      if (process.env.AA_DEBUG) {
+        let parses = "ok";
+        try {
+          new vm.Script(decl.code);
+        } catch (e) {
+          parses = `UNPARSEABLE (${e.message})`;
+        }
+        console.error(
+          `[debug] repaired ${missing[1]} @${decl.at} ${parses}` +
+            (decl.promoted === undefined && seen.has(missing[1]) ? " (hoisted)" : "") +
+            `\n        ${decl.code.slice(0, 160).replace(/\n/g, " ")}`
+        );
+      }
+      seen.set(missing[1], {
+        at: -1_000_000 - seen.size,
+        code: decl.code,
+        promoted: true,
+      });
+      walk(
+        [...decl.code.matchAll(/[A-Za-z_$][\w$]{1,}/g)].map((m) => m[0])
+      );
+    }
+  }
+  if (!sandbox) throw new Error("mask builder never replayed cleanly");
 
   const mask = sandbox.__mask;
   const buildId = sandbox.__build;
@@ -348,6 +498,78 @@ function extractQueryHash(src, resolver) {
 /// the homepage only as a fallback.
 const ROUTES = (process.env.SCAN_ROUTES || "/anime,/manga,/").split(",");
 
+/// Identifies the chunk holding the signing code.
+///
+/// This deliberately does not look for the bootstrap URL. That literal used to
+/// be the anchor, but upstream now assembles the path at runtime, so the string
+/// vanished from the bundle and the scan silently found no crypto at all. These
+/// markers are things the code cannot avoid emitting: the request header names
+/// it sets and the field it reads back off the bootstrap response. Any one is
+/// enough, so a future rename of a single marker degrades instead of breaking.
+const CRYPTO_MARKERS = [
+  "x-aa-boot",
+  "x-build-id",
+  "aaReq",
+  "partB",
+  "bootPrefix",
+  "__mask",
+  "__build",
+  "maskHex",
+  "buildId",
+  "bootParts",
+];
+
+function looksLikeCryptoChunk(js) {
+  if (!js || typeof js !== "string") return false;
+  return (
+    CRYPTO_MARKERS.some((m) => js.includes(m)) ||
+    /__mask\s*[:=]/.test(js) ||
+    /__build\s*[:=]/.test(js) ||
+    /bootPrefix\s*[:=]/.test(js) ||
+    /partB\s*[:=]/.test(js) ||
+    /maskHex\s*[:=]/.test(js) ||
+    /x-aa-boot/.test(js) ||
+    /x-build-id/.test(js)
+  );
+}
+
+function extractBuildIdFromJs(js) {
+  const matches = [
+    ...js.matchAll(/__build\s*[:=]\s*["']?(\d{1,4})["']?/g),
+    ...js.matchAll(/\bbuildId\s*[:=]\s*["']?(\d{1,4})["']?/g),
+    ...js.matchAll(/["']?buildId["']?\s*:\s*["']?(\d{1,4})["']?/g),
+  ];
+  const values = matches.map((m) => Number(m[1])).filter((n) => Number.isFinite(n));
+  return values.length ? String(Math.max(...values)) : null;
+}
+
+function extractMaskHexFromJs(js) {
+  const matches = [
+    ...js.matchAll(/__mask\s*[:=]\s*["']?([A-Fa-f0-9]{64})["']?/g),
+    ...js.matchAll(/\bmaskHex\s*[:=]\s*["']?([A-Fa-f0-9]{64})["']?/g),
+    ...js.matchAll(/["']?mask["']?\s*:\s*["']?([A-Fa-f0-9]{64})["']?/g),
+  ];
+  return matches[0]?.[1] || null;
+}
+
+function extractBootParamsFromJs(js) {
+  const bootPrefix =
+    [...js.matchAll(/bootPrefix\s*[:=]\s*["']([^"']+)["']/g)][0]?.[1] ||
+    [...js.matchAll(/["']bootPrefix["']\s*:\s*["']([^"']+)["']/g)][0]?.[1] ||
+    "aa-boot:";
+
+  const join =
+    [...js.matchAll(/join\s*[:=]\s*["']([^"']+)["']/g)][0]?.[1] || ":";
+
+  const parts =
+    [...js.matchAll(/parts\s*[:=]\s*\[([^\]]+)\]/g)][0]?.[1]
+      ?.match(/[A-Za-z_]+/g)
+      ?.filter(Boolean) ||
+    ["buildId", "group", "host", "epoch", "lane"];
+
+  return { bootPrefix, join, parts };
+}
+
 function entriesIn(html) {
   return [
     ...new Set(
@@ -389,7 +611,7 @@ async function scanRoute(route, errors) {
     } catch {
       continue;
     }
-    if (!material && js.includes("client-crypto/v1/bootstrap")) {
+    if (!material && looksLikeCryptoChunk(js)) {
       try {
         material = extractMaterial(js);
       } catch (err) {
