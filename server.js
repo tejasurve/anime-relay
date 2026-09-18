@@ -78,7 +78,11 @@ async function handleProtected(req, res, resolver, variables) {
     console.log(`[api] ${resolver} ok in ${Date.now() - started}ms`);
   } catch (err) {
     console.error(`[api] ${resolver} failed: ${err.message}`);
-    graphqlError(res, resolver, err.message);
+    // Do not report an upstream/protection failure as a successful HTTP 200.
+    // The body keeps the existing GraphQL error contract for older clients,
+    // while the status lets current clients trigger their normal retry/fallback.
+    const status = /NEED_CAPTCHA/i.test(err.message) ? 503 : 502;
+    graphqlError(res, resolver, err.message, status);
   }
 }
 

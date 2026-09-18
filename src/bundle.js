@@ -175,7 +175,7 @@ const RESERVED = new Set([
 function findDecl(src, name, lo, hi) {
   const esc = name.replace(/\$/g, "\\$");
   const inRange = (i) => i >= lo && i < hi;
-  for (const fn of src.matchAll(new RegExp(`function\\s+${esc}\\s*\\(`, "g"))) {
+  for (const fn of src.matchAll(new RegExp(`(?:async\\s+)?function\\s+${esc}\\s*\\(`, "g"))) {
     if (inRange(fn.index)) {
       return { at: fn.index, code: balancedBody(src, fn.index) };
     }
