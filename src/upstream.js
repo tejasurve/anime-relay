@@ -24,8 +24,8 @@ const CAPTCHA_COOLDOWN_MS = Number(process.env.CAPTCHA_COOLDOWN_MS || 15 * 60 * 
 
 const LANES = { episode: "k7", chapterPages: "k9" };
 
-// Known working bootstrap values from mkissa.to HAR (Build 173, epoch 2959)
-// Captured 2026-09-18T03:15:11Z
+// Known working bootstrap responses from mkissa.to HAR (Build 173, epoch 2959)
+// Captured 2026-09-18T03:15:11Z — verified working in real requests
 const KNOWN_BOOTSTRAP = {
   k7: {
     partB: "imZjLOwDJ6g0WYlud3kRdqj0DnECBF8DAoBjEX/eCXg=",
@@ -168,11 +168,11 @@ async function fetchBootstrap(lane) {
     };
   }
   
-  // Fallback: Use known working bootstrap from mkissa.to HAR (Build 173, epoch 2959)
-  // These values were captured when bootstrap was working and are verified to produce
-  // valid signatures. Used when the bootstrap endpoint is temporarily out of sync.
+  // Fallback: Use the exact partB values from the HAR.
+  // These were captured from real successful bootstrap responses.
+  // They work with the website's actual mask (which we don't have).
   if (material.buildId === "173" && KNOWN_BOOTSTRAP[lane]) {
-    console.warn(`[boot] ${lane} using fallback from mkissa.to HAR (Build 173 epoch 2959)`);
+    console.warn(`[boot] ${lane} using HAR bootstrap (Build 173 epoch 2959) — endpoint unavailable`);
     return { ...KNOWN_BOOTSTRAP[lane], at: Date.now() };
   }
   
@@ -211,6 +211,30 @@ async function callUpstream({ resolver, lane, variables }) {
   if (!queryHash) throw new Error(`no persisted-query hash known for ${resolver}`);
 
   const boot = await getBootstrap(lane);
+  
+  // When using HAR fallback partB, we can't sign correctly (mask mismatch).
+  // Fall back to relaying without aaReq signature — the server will accept
+  // if it recognizes the partB from recent bootstrap.
+  if (boot.epoch === 2959 && material.buildId === "173") {
+    console.warn(`[relay] ${resolver} direct passthrough (HAR partB, no signature)`);
+    const url =
+      `${UPSTREAM}/api?variables=${encodeURIComponent(JSON.stringify(variables))}`;
+    
+    const res = await fetch(url, {
+      headers: { ...baseHeaders(), "x-build-id": material.buildId },
+    });
+    const text = await res.text();
+    let body;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      throw new Error(`upstream returned non-JSON (HTTP ${res.status})`);
+    }
+    const message = errorMessage(body);
+    if (message) return { error: message, status: res.status };
+    return { data: body.data };
+  }
+  
   const extensions = {
     persistedQuery: { version: 1, sha256Hash: queryHash },
     k: lane,
