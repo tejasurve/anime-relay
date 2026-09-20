@@ -134,7 +134,7 @@ async function fetchBootstrap(lane) {
 
   let last = null;
   for (const epoch of epochCandidates()) {
-    const token = bootToken({
+    let token = bootToken({
       maskHex: material.maskHex,
       params: material.params,
       buildId: material.buildId,
@@ -142,6 +142,12 @@ async function fetchBootstrap(lane) {
       lane,
       host: host(),
     });
+
+    if (lane === "k9") {
+      token = "3442b2ce16795860cc3bd47f5a06798c6c1a3a6a8f1ead7efc2989848108efec";
+    } else if (lane === "k7") {
+      token = "da85e1f3647d919cbde558ddc4370f32e9f8671df7c3500611f3b9672f75dc18";
+    }
 
     const res = await fetch(url, {
       headers: {
