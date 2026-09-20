@@ -77,8 +77,8 @@ function baseHeaders() {
   return {
     accept: "*/*",
     "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
-    origin: SITE,
-    referer: `${SITE}/`,
+    origin: "https://isekai2nd.com",
+    referer: "https://isekai2nd.com/",
     "user-agent": UA,
   };
 }
@@ -140,7 +140,7 @@ async function fetchBootstrap(lane) {
       buildId: material.buildId,
       epoch,
       lane,
-      host: host(),
+      host: "isekai2nd.com",
     });
 
     if (lane === "k9") {
