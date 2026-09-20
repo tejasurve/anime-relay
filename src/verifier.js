@@ -47,6 +47,10 @@ function snapshot() {
     bootJoin: m ? m.params.join : null,
     bootParts: m ? m.params.parts.join(",") : null,
     hashes: { ...state.hashes },
+    boots: {
+      k7: state.boot.get("k7") || null,
+      k9: state.boot.get("k9") || null,
+    },
   };
 }
 
@@ -151,8 +155,18 @@ async function maybePublish(snap, valuesValid) {
     aa_boot_prefix: snap.bootPrefix,
     aa_boot_join: snap.bootJoin,
     aa_boot_parts: snap.bootParts,
+    aa_part_b_k7: snap.boots.k7 ? snap.boots.k7.partB : null,
+    aa_epoch_k7: snap.boots.k7 ? snap.boots.k7.epoch.toString() : null,
+    aa_part_b_k9: snap.boots.k9 ? snap.boots.k9.partB : null,
+    aa_epoch_k9: snap.boots.k9 ? snap.boots.k9.epoch.toString() : null,
+    x_aa_boot_k7: snap.boots.k7 && snap.boots.k7.token ? snap.boots.k7.token : null,
+    x_aa_boot_k9: snap.boots.k9 && snap.boots.k9.token ? snap.boots.k9.token : null,
   };
   for (const [k, v] of Object.entries(values)) {
+    if (k.startsWith("x_aa_boot_") && (v === undefined || v === null || v === "")) {
+      values[k] = "";
+      continue;
+    }
     if (v === undefined || v === null || v === "") {
       console.warn(`[publish] skipped — ${k} missing from scan`);
       return { skipped: `${k} missing` };

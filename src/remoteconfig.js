@@ -30,6 +30,12 @@ const MANAGED_KEYS = [
   "aa_boot_prefix",
   "aa_boot_join",
   "aa_boot_parts",
+  "aa_part_b_k7",
+  "aa_epoch_k7",
+  "aa_part_b_k9",
+  "aa_epoch_k9",
+  "x_aa_boot_k7",
+  "x_aa_boot_k9",
 ];
 
 function serviceAccount() {

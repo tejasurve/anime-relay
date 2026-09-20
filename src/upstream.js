@@ -134,18 +134,20 @@ async function fetchBootstrap(lane) {
 
   let last = null;
   for (const epoch of epochCandidates()) {
+    const token = bootToken({
+      maskHex: material.maskHex,
+      params: material.params,
+      buildId: material.buildId,
+      epoch,
+      lane,
+      host: host(),
+    });
+
     const res = await fetch(url, {
       headers: {
         ...baseHeaders(),
         "x-build-id": material.buildId,
-        "x-aa-boot": bootToken({
-          maskHex: material.maskHex,
-          params: material.params,
-          buildId: material.buildId,
-          epoch,
-          lane,
-          host: host(),
-        }),
+        "x-aa-boot": token,
       },
     });
     const text = await res.text();
@@ -165,6 +167,7 @@ async function fetchBootstrap(lane) {
       switchAt: body.switchAt || 0,
       at: Date.now(),
       raw: body,
+      token,
     };
   }
   
