@@ -43,7 +43,7 @@ async function run() {
     vm.runInContext(configCode.slice(fdIdx), ctx);
 
     // Run crypto code
-    const cryptoChunk = js.slice(js.indexOf('function i_('), js.indexOf('async function sT(') + 1500);
+    const cryptoChunk = js.slice(js.indexOf('function i_('), js.indexOf('async function xy(') + 1500);
     vm.runInContext(cryptoChunk, ctx);
 
     const tokenK9 = await ctx.cT({ buildId: '174', epoch: 2959, keyGroup: 'mkissa', refererHost: 'mkissa.to', contentLane: 'k9' });

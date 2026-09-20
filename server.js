@@ -187,6 +187,10 @@ app.use(async (req, res) => {
   }
 
   if (req.path === "/api" && req.method === "GET") {
+    const extensions = parseJsonParam(req.query.extensions);
+    if (extensions && extensions.aaReq) {
+      return handlePassthrough(req, res);
+    }
     const variables = parseJsonParam(req.query.variables);
     const resolver = resolverFor(variables);
     if (resolver) return handleProtected(req, res, resolver, variables);
